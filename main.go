@@ -14,7 +14,7 @@ import (
 
 var (
 	pgurl        = flag.String("url", "postgresql://root@127.0.0.1:26257/defaultdb?sslmode=disable", "pg_url")
-	iterations   = flag.Int("iterations", 100, "number of iterations to run")
+	iterations   = flag.Int("iterations", 1000, "number of iterations to run")
 	writeThreads = flag.Int("write_threads", 3, "number of write threads to run")
 	readThreads  = flag.Int("read_threads", 10, "number of write threads to run")
 )
@@ -69,48 +69,52 @@ func main() {
 					os.Exit(1)
 				}
 				defer conn.Release()
-				func() {
-					tx, err := conn.Begin(ctx)
-					defer func() { _ = tx.Rollback(ctx) }()
-					if err != nil {
-						log.Fatalf("failed to start txn: %v", err)
-					}
-
-					for _, cmd := range []string{
-						`SELECT "developers"."id", "developers"."name", "developers"."salary", "developers"."firm_id", "developers"."mentor_id", "developers"."legacy_created_at", "developers"."legacy_updated_at", "developers"."legacy_created_on", "developers"."legacy_updated_on" FROM "developers" WHERE "developers"."id" = 1 LIMIT 1;`,
-						`UPDATE "developers" SET "salary" = 200000 WHERE "developers"."id" = 1;`,
-					} {
-						if _, err := tx.Exec(ctx, cmd); err != nil {
-							fmt.Printf("failed to run cmd %q: %#v\n", cmd, err)
-							return
+				for {
+					err = func() error {
+						tx, err := conn.Begin(ctx)
+						defer func() { _ = tx.Rollback(ctx) }()
+						if err != nil {
+							log.Fatalf("failed to start txn: %v", err)
 						}
-					}
 
-					var s int
-					if err := tx.QueryRow(ctx, `SELECT "developers"."salary" FROM "developers" WHERE "developers"."id" = 1 LIMIT 1`).Scan(&s); err != nil {
-						log.Fatalf("failed to get salary: %v", err)
-					}
-
-					if s != 200000 {
-						fmt.Printf("read salary, expect temporary value, got %s\n", s)
-						panic("f")
-					}
-
-					for _, cmd := range []string{
-						fmt.Sprintf(`UPDATE "developers" SET "salary" = 80000 WHERE "developers"."id" = 1;`),
-						`SELECT "developers"."id", "developers"."name", "developers"."salary", "developers"."firm_id", "developers"."mentor_id", "developers"."legacy_created_at", "developers"."legacy_updated_at", "developers"."legacy_created_on", "developers"."legacy_updated_on" FROM "developers" WHERE "developers"."id" = 1 LIMIT 1;`,
-					} {
-						if _, err := tx.Exec(ctx, cmd); err != nil {
-							fmt.Printf("failed to run cmd %q: %#v\n", cmd, err)
-							return
+						for _, cmd := range []string{
+							`SELECT "developers"."id", "developers"."name", "developers"."salary", "developers"."firm_id", "developers"."mentor_id", "developers"."legacy_created_at", "developers"."legacy_updated_at", "developers"."legacy_created_on", "developers"."legacy_updated_on" FROM "developers" WHERE "developers"."id" = 1 LIMIT 1;`,
+							`UPDATE "developers" SET "salary" = 200000 WHERE "developers"."id" = 1;`,
+						} {
+							if _, err := tx.Exec(ctx, cmd); err != nil {
+								return err
+							}
 						}
-					}
 
-					if err := tx.Commit(ctx); err != nil {
-						fmt.Printf("failed to commit: %v", err)
-						return
+						var s int
+						if err := tx.QueryRow(ctx, `SELECT "developers"."salary" FROM "developers" WHERE "developers"."id" = 1 LIMIT 1`).Scan(&s); err != nil {
+							log.Fatalf("failed to get salary: %v", err)
+						}
+
+						if s != 200000 {
+							fmt.Printf("read salary, expect temporary value, got %s\n", s)
+							panic("f")
+						}
+
+						for _, cmd := range []string{
+							fmt.Sprintf(`UPDATE "developers" SET "salary" = 80000 WHERE "developers"."id" = 1;`),
+							`SELECT "developers"."id", "developers"."name", "developers"."salary", "developers"."firm_id", "developers"."mentor_id", "developers"."legacy_created_at", "developers"."legacy_updated_at", "developers"."legacy_created_on", "developers"."legacy_updated_on" FROM "developers" WHERE "developers"."id" = 1 LIMIT 1;`,
+						} {
+							if _, err := tx.Exec(ctx, cmd); err != nil {
+								return err
+							}
+						}
+
+						if err := tx.Commit(ctx); err != nil {
+							return err
+						}
+						return nil
+					}()
+					if err == nil {
+						break
 					}
-				}()
+					fmt.Printf("retrying write... %v\n", err)
+				}
 			}()
 		}
 
@@ -124,7 +128,7 @@ func main() {
 					os.Exit(1)
 				}
 				defer conn.Release()
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(50 * time.Millisecond)
 				func() {
 					tx, err := conn.Begin(ctx)
 					if err != nil {
@@ -148,6 +152,23 @@ func main() {
 				}()
 			}()
 		}
+
+		func() {
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				os.Exit(1)
+			}
+			defer conn.Release()
+			var s int
+			if err := conn.QueryRow(ctx, `SELECT "developers"."salary" FROM "developers" WHERE "developers"."id" = 1 LIMIT 1`).Scan(&s); err != nil {
+				log.Fatalf("failed to get salary: %v", err)
+			}
+
+			if s != 80000 {
+				fmt.Printf("reproduced at end, got %d\n", s)
+				panic("f")
+			}
+		}()
 		wg.Wait()
 	}
 	fmt.Printf("done!\n")
